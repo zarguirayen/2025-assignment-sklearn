@@ -82,6 +82,20 @@ class KNearestNeighbors(ClassifierMixin, BaseEstimator):
         self : instance of KNearestNeighbors
             The current instance of the classifier
         """
+        if not isinstance(self.n_neighbors, int) or self.n_neighbors <= 0:
+            raise ValueError("n_neighbors must be a positive integer.")
+        X, y = validate_data(self, X, y, reset=True, dtype="numeric")
+        target_type = type_of_target(y)
+        if target_type == "continuous":
+            raise ValueError(
+                "Unknown label type: continuous. "
+                "KNearestNeighbors is a classifier and requires discrete labels."
+            )
+        if self.n_neighbors > X.shape[0]:
+            raise ValueError("n_neighbors cannot be greater than n_samples.")
+        self.X_ = X
+        self.y_ = y
+        self.classes_ = np.unique(y)
         return self
 
     def predict(self, X):
@@ -97,7 +111,17 @@ class KNearestNeighbors(ClassifierMixin, BaseEstimator):
         y : ndarray, shape (n_test_samples,)
             Predicted class labels for each test data sample.
         """
-        y_pred = np.zeros(X.shape[0])
+        check_is_fitted(self, attributes=["X_", "y_", "classes_"])
+        X = validate_data(self, X, reset=False, dtype="numeric")
+        distances = pairwise_distances(X, self.X_, metric="euclidean")
+        nearest_idx = np.argsort(distances, axis=1)[:, : self.n_neighbors]
+        nearest_labels = self.y_[nearest_idx]
+        if self.n_neighbors == 1:
+            return nearest_labels.ravel()
+        y_pred = np.empty(nearest_labels.shape[0], dtype=self.y_.dtype)
+        for i, labels in enumerate(nearest_labels):
+            values, counts = np.unique(labels, return_counts=True)
+            y_pred[i] = values[np.argmax(counts)]
         return y_pred
 
     def score(self, X, y):
@@ -115,7 +139,8 @@ class KNearestNeighbors(ClassifierMixin, BaseEstimator):
         score : float
             Accuracy of the model computed for the (X, y) pairs.
         """
-        return 0.
+        y_pred = self.predict(X)
+        return float(np.mean(y_pred == y))
 
 
 class MonthlySplit(BaseCrossValidator):
@@ -136,7 +161,23 @@ class MonthlySplit(BaseCrossValidator):
 
     def __init__(self, time_col='index'):  # noqa: D107
         self.time_col = time_col
-
+    def _get_time_index(self, X):
+        """Return a DatetimeIndex built from X according to `time_col`."""
+        if not isinstance(X, pd.DataFrame):
+            raise ValueError("X must be a pandas DataFrame.")
+        if self.time_col == "index":
+            time_index = X.index
+        else:
+            if self.time_col not in X.columns:
+                raise ValueError(f"Column {self.time_col!r} not found in X.")
+            time_index = X[self.time_col]
+        if isinstance(time_index, pd.DatetimeIndex):
+            return time_index
+        if pd.api.types.is_datetime64_any_dtype(time_index):
+            return pd.DatetimeIndex(time_index)
+        raise ValueError(
+            f"The column {self.time_col} should be of type datetime."
+        )
     def get_n_splits(self, X, y=None, groups=None):
         """Return the number of splitting iterations in the cross-validator.
 
@@ -155,7 +196,10 @@ class MonthlySplit(BaseCrossValidator):
         n_splits : int
             The number of splits.
         """
-        return 0
+        time_index = self._get_time_index(X)
+        months = time_index.to_period("M")
+        unique_months = months.unique().sort_values()
+        return int(max(len(unique_months) - 1, 0))
 
     def split(self, X, y, groups=None):
         """Generate indices to split data into training and test set.
@@ -177,12 +221,11 @@ class MonthlySplit(BaseCrossValidator):
         idx_test : ndarray
             The testing set indices for that split.
         """
-
-        n_samples = X.shape[0]
-        n_splits = self.get_n_splits(X, y, groups)
-        for i in range(n_splits):
-            idx_train = range(n_samples)
-            idx_test = range(n_samples)
-            yield (
-                idx_train, idx_test
-            )
+        time_index = self._get_time_index(X)
+        months = time_index.to_period("M")
+        unique_months = months.unique().sort_values()
+        positions = np.arange(len(time_index))
+        for train_month, test_month in zip(unique_months[:-1], unique_months[1:]):
+            idx_train = positions[months == train_month]
+            idx_test = positions[months == test_month]
+            yield idx_train, idx_test
