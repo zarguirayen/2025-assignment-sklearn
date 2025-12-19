@@ -231,3 +231,4 @@ class MonthlySplit(BaseCrossValidator):
                 elif (date.year, date.month) == test_month:
                     idx_test.append(idx)
             yield (np.array(idx_train), np.array(idx_test))
+            
